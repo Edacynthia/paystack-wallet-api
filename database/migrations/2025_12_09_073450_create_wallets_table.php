@@ -13,8 +13,8 @@ return new class extends Migration
     {
         Schema::create('wallets', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('user_id')->constrained()->onDelete('cascade');
-            $table->bigInteger('balance')->default(0); // stored in kobo/cents
+            $table->foreignId('user_id')->constrained()->unique();
+            $table->decimal('balance', 15, 2)->default(0.00);
             $table->timestamps();
         });
     }

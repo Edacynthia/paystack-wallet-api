@@ -1,30 +1,108 @@
 <?php
 
-use App\Http\Controllers\ApiKeyController;
-use App\Http\Controllers\AuthController;
-use App\Http\Controllers\PaystackController;
-use App\Http\Controllers\WalletController;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-// Google OAuth routes
-Route::get('auth/google', [AuthController::class,'redirectToGoogle']);
-Route::get('auth/google/callback', [AuthController::class,'handleGoogleCallback']);
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\KeyController;
 
-// Paystack webhook (public)
-Route::post('wallet/paystack/webhook', [PaystackController::class,'webhook']);
+use App\Http\Controllers\WalletController;
+use App\Http\Controllers\ApiKeyController;
 
-// endpoints protected with JWT or API key
-Route::middleware('api_or_key')->group(function () {
-    Route::post('wallet/deposit', [WalletController::class,'initDeposit'])->middleware('api_or_key:deposit');
-    Route::get('wallet/deposit/{reference}/status', [WalletController::class,'depositStatus'])->middleware('api_or_key:read');
-    Route::get('wallet/balance', [WalletController::class,'balance'])->middleware('api_or_key:read');
-    Route::post('wallet/transfer', [WalletController::class,'transfer'])->middleware('api_or_key:transfer');
-    Route::get('wallet/transactions', [WalletController::class,'transactions'])->middleware('api_or_key:read');
+Route::get('/user', function (Request $request) {
+    return response()->json([
+        "success" => true,
+        'message' => 'Accessed with API Key (Service)',
+        'user' => $request->user(),
+        'token_id' => $request->user()->currentAccessToken()->id
+    ]);
+})->middleware('auth:sanctum');
+
+// 1. User Authentication (JWT)
+Route::prefix('auth')->group(function () {
+    // public routes
+    Route::post('signup', [AuthController::class, 'signup']);
+    Route::post('login', [AuthController::class, 'login']);
+    // Protected by the JWT guard
+    Route::post('logout', [AuthController::class, 'logout'])->middleware('auth:api');
 });
 
-// API key management - only via JWT user (no API key management via API key)
-Route::middleware(['auth:api'])->group(function() {
-    Route::post('keys/create', [ApiKeyController::class,'create']);
-    Route::post('keys/rollover', [ApiKeyController::class,'rollover']);
-    Route::post('keys/revoke', [ApiKeyController::class,'revoke']);
+// 2. API Key Management (Protected by JWT, used by a User)
+Route::middleware('auth:api')->prefix('keys')->group(function () {
+    Route::post('create', [KeyController::class, 'create']);
+    Route::delete('{tokenId}/revoke', [KeyController::class, 'revoke']);
 });
+
+// 3. Protected Routes
+
+// a) User-only access (Protected by JWT)
+Route::middleware('auth:api')->get('/user-resource', function (Request $request) {
+    return response()->json([
+        'message' => 'Accessed with JWT (User)',
+        'user' => $request->user(),
+        'token_expires' => auth()->guard('api')->payload()->get('exp'),
+
+    ]);
+});
+
+// b) Service-to-Service access (Protected by Sanctum/API Key)
+Route::middleware('auth:sanctum')->get('/service-resource', function (Request $request) {
+    // Optional: Check for the specific ability assigned when the key was created
+    if (!$request->user()->tokenCan('service:access')) {
+        return response()->json([
+            "success" => false,
+            'error' => 'Key lacks required ability'
+        ], 403);
+    }
+    return response()->json([
+        "success" => true,
+        'message' => 'Accessed with API Key (Service)',
+        'user' => $request->user(),
+        'token_id' => $request->user()->currentAccessToken()->id
+    ]);
+});
+
+// 1. Google Auth (No middleware needed)
+Route::controller(AuthController::class)->prefix('auth')->group(function () {
+    Route::get('google', 'redirectToGoogle');
+    Route::get('google/callback', 'handleGoogleCallback');
+});
+
+// 2. Paystack Webhook (No standard auth, uses signature validation)
+Route::post('wallet/paystack/webhook', [WalletController::class, 'handlePaystackWebhook']);
+
+// 3. Protected Routes (Use auth:sanctum which handles both JWT and API Key)
+Route::middleware(['auth:api'])->group(function () {
+
+    // API Key Management (User access only - implied by auth:sanctum user model)
+    Route::prefix('keys')->controller(KeyController::class)->group(function () {
+        Route::post('create', 'create');
+        Route::post('rollover', 'rollover'); // Implement logic in controller
+        Route::delete('{tokenId}/revoke', 'revoke'); // Implement logic in controller
+    });
+
+    // Wallet Endpoints (Requires permission checks for API keys)
+    Route::controller(WalletController::class)->prefix('wallet')->group(function () {
+       // Deposit money
+        Route::post('deposit', 'deposit');
+
+        // Verify deposit status (read-only, anyone with JWT or API key can check)
+        Route::get('deposit/{reference}/status', 'verifyDepositStatus');
+
+        // Transfer money to another wallet
+        Route::post('transfer', 'transfer');
+
+        // Get wallet balance
+        Route::get('balance', 'getBalance');
+
+        // Get transaction history
+        Route::get('transactions', 'getTransactions');
+    });
+});
+
+
+
+// paystack webhook
+Route::post('wallet/paystack/webhook', [WalletController::class, 'handlePaystackWebhook']);
+// verify transaction status
+Route::get('wallet/paystack/webhook', [WalletController::class, 'verifyPayment']);

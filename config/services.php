@@ -38,7 +38,14 @@ return [
     'google' => [
         'client_id' => env('GOOGLE_CLIENT_ID'),
         'client_secret' => env('GOOGLE_CLIENT_SECRET'),
-        'redirect' => env('APP_URL') . '/api/auth/google/callback',
+        'redirect' => env('GOOGLE_REDIRECT'),
    ],
+
+    // Paystack Payment Gateway
+    'paystack' => [
+        'secret' => env('PAYSTACK_SECRET'),
+        'public' => env('PAYSTACK_PUBLIC_KEY'),
+        'url' => env('PAYSTACK_BASE'),
+    ],
 
 ];

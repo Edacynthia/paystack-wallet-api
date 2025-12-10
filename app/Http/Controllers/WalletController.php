@@ -2,127 +2,262 @@
 
 namespace App\Http\Controllers;
 
+use App\Helpers\ApiResponse;
+use App\Helpers\Paystack;
 use App\Models\Transaction;
-use App\Models\User;
+use App\Models\Wallet;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Hash;
+
+use function Laravel\Prompts\info;
+use function Symfony\Component\Clock\now;
 
 class WalletController extends Controller
 {
-    public function initDeposit(Request $req)
-{
-    $req->validate(['amount'=>'required|integer|min:1']);
+    public function deposit(Request $request)
+    {
 
-    $user = $req->user();
-    $wallet = $user->wallet ?? $user->wallet()->create(['balance'=>0]);
-
-    $amountKobo = $req->amount * 100; // store and send lowest currency unit
-
-    // create pending transaction (idempotency: reference must be unique)
-    $reference = 'paystack_' . Str::random(12);
-    $txn = $wallet->transactions()->create([
-        'reference' => $reference,
-        'type' => 'deposit',
-        'status' => 'pending',
-        'amount' => $amountKobo,
-        'meta' => ['initiated_by' => $user->id],
-    ]);
-
-    // call Paystack initialize
-    $resp = Http::withToken(config('services.paystack.secret') ?? env('PAYSTACK_SECRET'))
-        ->post(config('services.paystack.base') ?? env('PAYSTACK_BASE') . '/transaction/initialize', [
-            'amount' => $amountKobo,
-            'email' => $user->email,
-            'reference' => $reference,
-            'callback_url' => env('APP_URL') . '/api/wallet/paystack/webhook'
+        $data = $request->validate([
+            'amount' => 'required|numeric|min:100', // Minimum deposit of 100 units
         ]);
+        $amountInKobo = $data['amount'] * 100;
+        $reference = Str::random(12);
+        $user = $request->user();
 
-    $body = $resp->json();
+        DB::beginTransaction();
+        try {
+            // 2. Initialize Paystack
+            $paystackData = [
+                'name' => $user->name,
+                'amount' => $amountInKobo,
+                'email' => $user->email,
+                'reference' => $reference,
+                'payment_id' => Str::uuid(),
+                // callback_url
+                'callback_url' => env('APP_URL') . '/api/wallet/paystack/webhook', // Optional: Paystack often prefers server-to-server webhook
+                'metadata' => [
+                    'user_id' => $user->id,
+                ],
+            ];
 
-    if (!($resp->ok() && $body['status'] === true)) {
-        // update transaction as failed
-        $txn->update(['status'=>'failed','meta'=>array_merge($txn->meta?:[], ['paystack_error'=>$body])]);
-        return response()->json(['message'=>'Paystack initialize failed'], 500);
+            // $response = Paystack::getAuthorizationUrl($paystackData)->toArray();
+            $PSP = Paystack::make($paystackData);
+
+            if ($PSP['success']) {
+                // 1. Record pending transaction for idempotency
+                $user->wallet->transactions()->create([
+                    'type' => 'deposit',
+                    'amount' => $data['amount'],
+                    'reference' => $PSP['reference'],
+                    'status' => 'pending',
+                ]);
+                // Payment link
+                $response = [
+                    'amount' => $data['amount'] ?? ($amountInKobo / 100),
+                    'reference' => $PSP['reference'],
+                    'authorization_url' => $PSP['authorization_url'],
+                ];
+
+                // commit transaction
+                DB::commit();
+
+                // return response
+                return ApiResponse::success($response, 'Dedicated payment link created successfully, please make payment to validate your deposit!', 201, $response);
+            } else {
+                info('payment initialization error: ' . $PSP['message']);
+                return ApiResponse::error([], 'Error: unable to initialize payment process!', 500);
+            }
+            DB::commit();
+
+            return response()->json([
+                'reference' => $reference,
+                'authorization_url' => $response['data']['authorization_url'],
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['error' => 'Deposit initialization failed.'], 500);
+        }
     }
 
-    return response()->json([
-        'reference' => $reference,
-        'authorization_url' => $body['data']['authorization_url'],
-    ]);
-}
+    public function handlePaystackWebhook(Request $request)
+    {
 
-public function depositStatus($reference)
-{
-    $txn = Transaction::where('reference',$reference)->firstOrFail();
-    return response()->json(['reference'=>$txn->reference,'status'=>$txn->status,'amount'=>$txn->amount]);
-}
+        info('Paystack Webhook Received: ' . $request->getContent());
 
-public function balance(Request $req)
-{
-    $wallet = $req->user()->wallet;
-    return response()->json(['balance' => $wallet->balance]); // return as integer in kobo/cents
-}
+        // 1. Signature Validation (Security)
+        $paystackSignature = $request->header('x-paystack-signature');
+        $secret = config('services.paystack.secret');
 
-public function transactions(Request $req)
-{
-    $txns = $req->user()->wallet->transactions()->latest()->take(50)->get(['type','amount','status','reference','created_at']);
-    return response()->json($txns);
-}
-
-
-public function transfer(Request $req)
-{
-    $req->validate(['wallet_number'=>'required|string','amount'=>'required|integer|min:1']);
-    $sender = $req->user();
-    $senderWallet = $sender->wallet;
-    $amountKobo = $req->amount * 100;
-
-    // find recipient by wallet number - adapt to your lookup scheme
-    $recipientUser = User::where('wallet_number', $req->wallet_number)->first();
-    if (!$recipientUser) return response()->json(['message'=>'Recipient not found'],404);
-
-    $recipientWallet = $recipientUser->wallet ?? $recipientUser->wallet()->create(['balance'=>0]);
-
-    // atomic transfer
-    DB::beginTransaction();
-    try {
-        // debit sender
-        if ($senderWallet->balance < $amountKobo) {
-            DB::rollBack();
-            return response()->json(['message'=>'Insufficient balance'], 422);
+        if ($paystackSignature !== hash_hmac('sha512', $request->getContent(), $secret)) {
+            Log::warning('Paystack Webhook: Invalid Signature.', $request->all());
+            return response()->json(['status' => false], 403);
         }
 
-        $ref = 'transfer_' . Str::random(12);
+        $event = $request->event;
+        $data = $request->data;
+        $reference = $data['reference'];
 
-        $senderTxn = $senderWallet->transactions()->create([
-            'reference' => $ref,
-            'type' => 'transfer',
-            'status' => 'success',
-            'amount' => -1 * $amountKobo, // optional: negative to indicate debit OR keep positive and type indicates debit
-            'meta' => ['to_user' => $recipientUser->id],
-        ]);
-        $senderWallet->decrement('balance', $amountKobo);
+        // 2. Handle 'charge.success'
+        if ($event === 'charge.success') {
+            // Atomic & Idempotency Check
+            DB::beginTransaction();
+            try {
+                $transaction = Transaction::where('reference', $reference)->lockForUpdate()->first();
 
-        $recipientTxn = $recipientWallet->transactions()->create([
-            'reference' => $ref,
-            'type' => 'transfer',
-            'status' => 'success',
-            'amount' => $amountKobo,
-            'meta' => ['from_user' => $sender->id],
-        ]);
-        $recipientWallet->increment('balance', $amountKobo);
+                if (!$transaction || $transaction->status !== 'pending') {
+                    // Already processed (idempotency), or transaction not found/invalid.
+                    DB::commit(); // Always acknowledge 200 OK to Paystack
+                    return response()->json(['status' => true]);
+                }
 
-        DB::commit();
-    } catch (\Exception $e) {
-        DB::rollBack();
-        return response()->json(['message'=>'Transfer failed','error'=>$e->getMessage()], 500);
+                // 3. Update Transaction and Credit Wallet
+                $transaction->status = 'success';
+                $transaction->save();
+
+                $wallet = $transaction->wallet()->lockForUpdate()->first();
+                $wallet->balance += $data['amount'] / 100; // Amount is in kobo/cent
+                $wallet->save();
+
+                DB::commit();
+                Log::info("Wallet credited successfully for reference: " . $reference);
+            } catch (\Exception $e) {
+                DB::rollBack();
+                Log::error("Webhook failed to process reference $reference: " . $e->getMessage());
+                return response()->json(['status' => false], 500); // Trigger Paystack retry
+            }
+        }
+
+        return response()->json(['status' => true]); // Always return 200 OK to Paystack
     }
 
-    return response()->json(['status'=>'success','message'=>'Transfer completed']);
+
+    public function transfer(Request $request)
+    {
+        // ... validation for amount and wallet_number ...
+        $data = $request->validate([
+            'amount' => 'required|numeric|min:10', // Minimum transfer of 100 units
+            'wallet_number' => 'required|exists:wallets,id', // Assuming wallet_number maps to wallet id
+        ]);
+
+        $senderWallet = $request->user()->wallet;
+        $recipientWallet = Wallet::where('id', $request->wallet_number)->first();
+        $amount = $request->amount;
+        $reference = Str::uuid(); // Unique reference for the transfer pair
+
+        if (!$recipientWallet) {
+            return ApiResponse::error([], 'Recipient wallet not found.', 404);
+        }
+        if ($senderWallet->balance < $amount) {
+            return ApiResponse::error([], 'Insufficient balance.', 403);
+        }
+
+        DB::transaction(function () use ($senderWallet, $recipientWallet, $amount, $reference) {
+            // 1. Debit Sender
+            $senderWallet->decrement('balance', $amount);
+            $senderWallet->transactions()->create([
+                'type' => 'transfer_out',
+                'amount' => $amount,
+                'reference' => $reference . date('YmdHis'),
+                'recipient_wallet_id' => $recipientWallet->id,
+                'status' => 'success',
+            ]);
+
+            // 2. Credit Recipient
+            $recipientWallet->increment('balance', $amount);
+            $recipientWallet->transactions()->create([
+                'type' => 'transfer_in',
+                'amount' => $amount,
+                'reference' => $reference . date('YmdHis') . rand(100, 999),
+                'recipient_wallet_id' => $senderWallet->id, // Store sender's wallet for history
+                'status' => 'success',
+            ]);
+        });
+
+        $response = [
+            'amount' => $amount,
+            'reference' => $reference,
+            'sender_wallet_balance' => $senderWallet->balance,
+        ];
+
+        // return response()->json(['status' => 'success', 'message' => 'Transfer completed']);
+        return ApiResponse::success($response, 'Transfer completed successfully.', 200);
+    }
+
+
+    // verify deposit status
+    public function verifyPayment(Request $request)
+    {
+        $data = $request->validate([
+            'reference' => 'required|string',
+        ]);
+
+        $reference = $data['reference'];
+        $transaction = Transaction::where('reference', $reference)->first();
+
+        if (!$transaction) {
+            return ApiResponse::error([], 'Transaction not found.', 404);
+        }
+
+        $PSP = Paystack::verify($reference);
+        if (!$PSP['success']) {
+            return ApiResponse::error([], 'Transaction verification failed: ' . $PSP['message'], 500);
+        }
+
+        info('Paystack Verification Response: ' . json_encode($PSP));
+
+        $transaction->status = $PSP['data']['status'];
+        $transaction->save();
+
+        $response = [
+            'reference' => $transaction->reference,
+            'status' => $transaction->status,
+            'amount' => $transaction->amount,
+            'type' => $transaction->type,
+            'created_at' => $transaction->created_at,
+        ];
+
+        return ApiResponse::success($response, 'Transaction retrieved successfully.', 200);
+    }
+
+
+    public function getBalance(Request $request)
+    {
+        $wallet = $request->user()->wallet;
+        return ApiResponse::success([
+            'balance' => $wallet->balance,
+            'currency' => 'NGN', // Assuming NGN, adjust as needed
+        ], 'Wallet balance retrieved successfully.', 200);
+    }
+
+
+    public function verifyDepositStatus($reference)
+    {
+        $transaction = Transaction::where('reference', $reference)->first();
+        if (!$transaction) {
+            return ApiResponse::error([], 'Transaction not found.', 404);
+        }
+        return ApiResponse::success([
+            'reference' => $transaction->reference,
+            'status' => $transaction->status,
+            'amount' => $transaction->amount,
+            'type' => $transaction->type,
+            'created_at' => $transaction->created_at,
+        ], 'Transaction retrieved successfully.', 200);
+    }
+
+    public function getTransactions(Request $request)
+{
+    $wallet = $request->user()->wallet;
+
+    $transactions = $wallet->transactions()->orderBy('created_at', 'desc')->paginate(10);
+
+    return ApiResponse::success(
+        $transactions,
+        'Wallet transactions retrieved successfully.'
+    );
 }
-
-
 
 }
