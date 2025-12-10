@@ -1,59 +1,145 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# paystack-wallet-api - Wallet & Authentication API
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A Laravel backend API for user authentication, wallets, transactions, and API key access. Supports JWT, Google OAuth, Paystack payments, and API key-based service-to-service access.
 
-## About Laravel
+---
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Features
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+* User signup/login with JWT
+* Google OAuth authentication
+* Wallet management:
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+  * Deposit via Paystack
+  * Wallet-to-wallet transfers
+  * Transaction history
+* API Key management (Sanctum) for service-to-service access
+* Middleware for JWT and API key authorization
+* Postman/Bruno collection support for API testing
 
-## Learning Laravel
+---
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+## Requirements
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+* PHP 8.x
+* Laravel 10.x
+* MySQL
+* Composer
+* Paystack account for payment integration
+* Google API credentials for OAuth
 
-## Laravel Sponsors
+---
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+## Installation
 
-### Premium Partners
+```bash
+git clone <repository_url>
+cd paystack-wallet-api
+composer install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+php artisan serve
+```
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+---
 
-## Contributing
+## Environment Setup
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Update your `.env` with:
 
-## Code of Conduct
+```dotenv
+APP_URL=http://localhost:8000
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=paystack_wallet_api
+DB_USERNAME=root
+DB_PASSWORD=
 
-## Security Vulnerabilities
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+PAYSTACK_SECRET=sk_test_xxx
+PAYSTACK_BASE=https://api.paystack.co
+PAYSTACK_WEBHOOK_SECRET=whsec_...
+```
 
-## License
+---
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+## Endpoints
+
+### Authentication (JWT)
+
+| Method | Endpoint                    | Description                    |
+| ------ | --------------------------- | ------------------------------ |
+| POST   | `/api/auth/signup`          | User registration, returns JWT |
+| POST   | `/api/auth/login`           | User login, returns JWT        |
+| POST   | `/api/auth/logout`          | Logout (JWT protected)         |
+| GET    | `/auth/google`          | Redirect to Google OAuth       |
+| GET    | `/auth/google/callback` | Google OAuth callback          |
+
+### Wallet
+
+| Method | Endpoint                                 | Description                      |
+| ------ | ---------------------------------------- | -------------------------------- |
+| POST   | `/api/wallet/deposit`                    | Initialize Paystack deposit      |
+| GET    | `/api/wallet/deposit/{reference}/status` | Verify deposit status            |
+| POST   | `/api/wallet/transfer`                   | Transfer funds to another wallet |
+| GET    | `/api/wallet/balance`                    | Retrieve wallet balance          |
+| GET    | `/api/wallet/transactions`               | List wallet transactions         |
+
+### API Key Management (Sanctum)
+
+| Method | Endpoint                     | Description                          |
+| ------ | ---------------------------- | ------------------------------------ |
+| POST   | `/api/keys/create`           | Generate new API key (JWT protected) |
+| POST   | `/api/keys/rollover`         | Rollover expired key                 |
+| DELETE | `/api/keys/{tokenId}/revoke` | Revoke API key                       |
+
+### Service-to-Service Access
+
+| Method | Endpoint                | Description                        |
+| ------ | ----------------------- | ---------------------------------- |
+| GET    | `/api/service-resource` | Access with API key only (Sanctum) |
+
+---
+
+## Authentication
+
+* JWT authentication for user-related routes.
+* Sanctum API keys for service-to-service access.
+* Custom abilities can be assigned to API keys (`service:access`).
+
+---
+
+## Paystack Integration
+
+* All amounts handled in **kobo**.
+* Webhooks validate successful payments and update wallet balances.
+* Ensure `PAYSTACK_SECRET` and `PAYSTACK_WEBHOOK_SECRET` are correct.
+
+---
+
+## API Key Management
+
+* Max 5 active API keys per user.
+* Keys can have expiration: 1H, 1D, 1M, 1Y.
+* Rollover allows generating a new key with same permissions.
+
+---
+
+## Testing
+
+* Use Postman or Bruno to test endpoints.
+* Include `Authorization: Bearer <token>` for JWT-protected routes.
+* Include `x-api-key` header for service-to-service routes.
+* Deposit and transfer endpoints require actual wallet balance.
+
+---
+
+## Postman / Bruno Collection
+
+* Export your Postman/Bruno collection as JSON.
+* Share with your team or import to test the API live.
